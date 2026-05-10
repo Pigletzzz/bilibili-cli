@@ -96,6 +96,8 @@ bili video BV1ABcsztEcY --subtitle-timeline        # With timeline
 bili video BV1ABcsztEcY -st --subtitle-format srt  # Export as SRT
 bili video BV1ABcsztEcY --ai            # AI summary
 bili video BV1ABcsztEcY --comments      # Top comments
+bili video BV1ABcsztEcY --comments --all-replies --yaml  # Top comments with full replies
+bili video BV1ABcsztEcY --comments --all-replies --max-reply-pages 2  # Limit reply pages per comment
 bili video BV1ABcsztEcY --related       # Related videos
 bili video BV1ABcsztEcY --yaml          # Agent-friendly YAML
 bili video BV1ABcsztEcY --json          # Normalized JSON envelope
@@ -163,6 +165,7 @@ All `--json` / `--yaml` output uses the shared envelope from [SCHEMA.md](./SCHEM
 Major commands now emit normalized payloads instead of raw upstream SDK blobs:
 
 - `bili video` → `data.video`, `data.subtitle`, `data.ai_summary`, `data.comments`, `data.related`, `data.warnings`
+  - `data.comments[].replies` contains nested comment replies; use `--all-replies` to fetch complete reply lists instead of the upstream preview replies
 - `bili hot` / `bili rank` → `data.items`
 - `bili search` → normalized user/video lists
 - `bili like` / `bili coin` / `bili triple` / `bili unfollow` → normalized write-action results
@@ -193,6 +196,7 @@ bili user-videos 946974 --max 3 --yaml
 ```
 
 For agent usage, also prefer narrower queries (`--max`, `--page`, `--offset`) to avoid wasting context on oversized payloads.
+When fetching all comment replies, consider `--max-reply-pages` because popular videos can have very large reply trees and may trigger rate limits.
 
 When an AI agent is asked to summarize a video, it should fetch subtitles first. Subtitles usually contain the core content of the video and are the best primary source for summarization. Only fall back to AI summary, comments, or audio extraction when subtitles are unavailable or insufficient.
 

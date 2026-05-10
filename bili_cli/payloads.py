@@ -112,7 +112,8 @@ def normalize_subtitle_items(raw: list[dict[str, Any]] | None) -> list[dict[str,
 def normalize_comment(item: dict[str, Any]) -> dict[str, Any]:
     member = item.get("member", {}) if isinstance(item.get("member"), dict) else {}
     content = item.get("content", {}) if isinstance(item.get("content"), dict) else {}
-    return {
+    replies = item.get("replies") if isinstance(item.get("replies"), list) else []
+    normalized = {
         "id": str(item.get("rpid_str") or item.get("rpid") or ""),
         "author": {
             "id": str(member.get("mid", "")),
@@ -121,7 +122,13 @@ def normalize_comment(item: dict[str, Any]) -> dict[str, Any]:
         "message": content.get("message", ""),
         "like": _to_int(item.get("like"), 0),
         "reply_count": _to_int(item.get("rcount"), 0),
+        "replies": [normalize_comment(reply) for reply in replies if isinstance(reply, dict)],
     }
+    if "reply_count_actual" in item:
+        normalized["reply_count_actual"] = _to_int(item.get("reply_count_actual"), 0)
+    if "reply_fetched" in item:
+        normalized["reply_fetched"] = bool(item.get("reply_fetched"))
+    return normalized
 
 
 def normalize_related_video(item: dict[str, Any]) -> dict[str, Any]:

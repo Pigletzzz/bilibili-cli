@@ -7,6 +7,7 @@ authenticated operations (subtitles, favorites, etc.).
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -342,21 +343,8 @@ async def get_rank_videos(day: int = 3) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _get_video_comments_direct(
-    aid: int,
-    bvid: str,
-    page: int,
-    credential: Credential | None = None,
-) -> dict[str, Any]:
-    """Fallback direct API call for video comments when SDK returns empty."""
-    api_url = "https://api.bilibili.com/x/v2/reply"
-    params = {
-        "oid": aid,
-        "type": 1,
-        "pn": page,
-        "ps": 20,
-        "sort": 2,  # hot/popular
-    }
+def _comment_api_headers(bvid: str, credential: Credential | None = None) -> dict[str, str]:
+    """Build browser-like headers for direct comment API calls."""
     headers = {
         "User-Agent": _USER_AGENT,
         "Origin": "https://www.bilibili.com",
@@ -372,10 +360,28 @@ async def _get_video_comments_direct(
         if credential.bili_jct:
             cookies.append(f"bili_jct={credential.bili_jct}")
         headers["Cookie"] = "; ".join(cookies)
+    return headers
+
+
+async def _get_video_comments_direct(
+    aid: int,
+    bvid: str,
+    page: int,
+    credential: Credential | None = None,
+) -> dict[str, Any]:
+    """Fallback direct API call for video comments when SDK returns empty."""
+    api_url = "https://api.bilibili.com/x/v2/reply"
+    params = {
+        "oid": aid,
+        "type": 1,
+        "pn": page,
+        "ps": 20,
+        "sort": 2,  # hot/popular
+    }
 
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(api_url, params=params, headers=headers) as resp:
+        async with session.get(api_url, params=params, headers=_comment_api_headers(bvid, credential)) as resp:
             resp.raise_for_status()
             payload = await resp.json()
     if payload.get("code") != 0:
@@ -386,8 +392,130 @@ async def _get_video_comments_direct(
     return data if isinstance(data, dict) else {}
 
 
+async def _fetch_comment_replies_page(
+    session: aiohttp.ClientSession,
+    *,
+    aid: int,
+    bvid: str,
+    root_rpid: int | str,
+    page: int,
+    page_size: int,
+    credential: Credential | None = None,
+) -> dict[str, Any]:
+    """Fetch one page of replies under a top-level comment."""
+    api_url = "https://api.bilibili.com/x/v2/reply/reply"
+    params = {
+        "oid": aid,
+        "type": 1,
+        "root": root_rpid,
+        "pn": page,
+        "ps": page_size,
+    }
+    async with session.get(api_url, params=params, headers=_comment_api_headers(bvid, credential)) as resp:
+        resp.raise_for_status()
+        payload = await resp.json()
+    if payload.get("code") != 0:
+        raise BiliError(f"获取评论回复: [{payload.get('code')}] {payload.get('message', 'Unknown error')}")
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+async def _get_comment_replies_direct(
+    aid: int,
+    bvid: str,
+    root_rpid: int | str,
+    credential: Credential | None = None,
+    *,
+    page_size: int = 20,
+    max_pages: int | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all available replies under a single top-level video comment."""
+    page_size = max(1, min(page_size, 49))
+    replies: list[dict[str, Any]] = []
+    page = 1
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while True:
+            if max_pages is not None and page > max_pages:
+                break
+
+            data = await _fetch_comment_replies_page(
+                session,
+                aid=aid,
+                bvid=bvid,
+                root_rpid=root_rpid,
+                page=page,
+                page_size=page_size,
+                credential=credential,
+            )
+            page_replies = data.get("replies")
+            if not isinstance(page_replies, list) or not page_replies:
+                break
+
+            replies.extend(item for item in page_replies if isinstance(item, dict))
+            page_info = data.get("page", {}) if isinstance(data.get("page"), dict) else {}
+            total = page_info.get("count")
+            if isinstance(total, int) and len(replies) >= total:
+                break
+            if len(page_replies) < page_size:
+                break
+            page += 1
+
+    return replies
+
+
+async def _attach_all_comment_replies(
+    result: dict[str, Any],
+    *,
+    aid: int,
+    bvid: str,
+    credential: Credential | None = None,
+    reply_page_size: int = 20,
+    max_reply_pages: int | None = None,
+    concurrency: int = 3,
+) -> dict[str, Any]:
+    """Attach complete reply lists to each top-level comment in a comments payload."""
+    comments = result.get("replies")
+    if not isinstance(comments, list) or not comments:
+        return result
+
+    enriched = copy.deepcopy(result)
+    enriched_comments = enriched.get("replies")
+    if not isinstance(enriched_comments, list):
+        return enriched
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def enrich(comment_item: dict[str, Any]) -> None:
+        root_rpid = comment_item.get("rpid_str") or comment_item.get("rpid")
+        if not root_rpid:
+            return
+        async with semaphore:
+            replies = await _get_comment_replies_direct(
+                aid=aid,
+                bvid=bvid,
+                root_rpid=root_rpid,
+                credential=credential,
+                page_size=reply_page_size,
+                max_pages=max_reply_pages,
+            )
+        comment_item["replies"] = replies
+        comment_item["reply_count_actual"] = len(replies)
+        comment_item["reply_fetched"] = True
+
+    await asyncio.gather(*(enrich(item) for item in enriched_comments if isinstance(item, dict)))
+    return enriched
+
+
 async def get_video_comments(
-    bvid: str, page: int = 1, credential: Credential | None = None
+    bvid: str,
+    page: int = 1,
+    credential: Credential | None = None,
+    *,
+    include_all_replies: bool = False,
+    reply_page_size: int = 20,
+    max_reply_pages: int | None = None,
 ) -> dict[str, Any]:
     """Fetch video comments with SDK-first + direct-API fallback strategy."""
     v = video.Video(bvid=bvid, credential=credential)
@@ -411,26 +539,37 @@ async def get_video_comments(
     except BiliError as exc:
         logger.warning("SDK comment fetch failed, fallback to direct API: %s", exc)
 
+    result: dict[str, Any]
     if isinstance(sdk_result, dict) and sdk_result.get("replies"):
-        return sdk_result
+        result = sdk_result
+    else:
+        try:
+            direct_result = await _call_api(
+                "获取视频评论",
+                _get_video_comments_direct(aid=aid, bvid=bvid, page=page, credential=credential),
+            )
+            result = direct_result if isinstance(direct_result, dict) else {}
+        except BiliError as exc:
+            if isinstance(sdk_result, dict) and sdk_result.get("replies"):
+                logger.warning("Direct comment fallback failed, return non-empty SDK result: %s", exc)
+                result = sdk_result
+            else:
+                logger.warning("Direct comment fallback failed after SDK empty/error: %s", exc)
+                raise
 
-    try:
-        direct_result = await _call_api(
-            "获取视频评论",
-            _get_video_comments_direct(aid=aid, bvid=bvid, page=page, credential=credential),
+    if include_all_replies:
+        return await _call_api(
+            "获取评论回复",
+            _attach_all_comment_replies(
+                result,
+                aid=aid,
+                bvid=bvid,
+                credential=credential,
+                reply_page_size=reply_page_size,
+                max_reply_pages=max_reply_pages,
+            ),
         )
-        if isinstance(direct_result, dict):
-            return direct_result
-    except BiliError as exc:
-        if isinstance(sdk_result, dict) and sdk_result.get("replies"):
-            logger.warning("Direct comment fallback failed, return non-empty SDK result: %s", exc)
-            return sdk_result
-        logger.warning("Direct comment fallback failed after SDK empty/error: %s", exc)
-        raise
-
-    if isinstance(sdk_result, dict):
-        return sdk_result
-    return {}
+    return result
 
 
 async def get_video_ai_conclusion(

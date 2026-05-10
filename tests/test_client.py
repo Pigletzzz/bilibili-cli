@@ -106,6 +106,51 @@ async def test_get_video_comments_uses_direct_when_sdk_errors():
 
 
 @pytest.mark.asyncio
+async def test_get_comment_replies_direct_paginates_until_reported_count():
+    pages = [
+        {"replies": [{"rpid": 11}, {"rpid": 12}], "page": {"count": 3}},
+        {"replies": [{"rpid": 13}], "page": {"count": 3}},
+    ]
+    with patch("bili_cli.client._fetch_comment_replies_page", new_callable=AsyncMock, side_effect=pages) as mock_page:
+        result = await client._get_comment_replies_direct(123, "BV1test123", 1, page_size=2)
+
+    assert [item["rpid"] for item in result] == [11, 12, 13]
+    assert mock_page.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_video_comments_can_attach_all_replies():
+    sdk_result = {"replies": [{"rpid": 1, "rcount": 2, "replies": [{"rpid": 99}]}]}
+    full_replies = [{"rpid": 11}, {"rpid": 12}]
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client.comment.get_comments", new_callable=AsyncMock, return_value=sdk_result), \
+         patch(
+             "bili_cli.client._get_comment_replies_direct",
+             new_callable=AsyncMock,
+             return_value=full_replies,
+         ) as mock_replies:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_video_comments(
+            "BV1test123",
+            include_all_replies=True,
+            reply_page_size=10,
+            max_reply_pages=2,
+        )
+
+    assert result["replies"][0]["replies"] == full_replies
+    assert result["replies"][0]["reply_count_actual"] == 2
+    assert result["replies"][0]["reply_fetched"] is True
+    mock_replies.assert_awaited_once_with(
+        aid=123,
+        bvid="BV1test123",
+        root_rpid=1,
+        credential=None,
+        page_size=10,
+        max_pages=2,
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_user_info(mock_user_info):
     with patch("bili_cli.client.user.User") as MockUser:
         MockUser.return_value.get_user_info = AsyncMock(return_value=mock_user_info)
