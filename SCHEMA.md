@@ -29,6 +29,8 @@ error:
 - `status` returns `data.authenticated` plus `data.user`
 - `whoami` returns `data.user` and `data.relation`
 - `video` returns `data.video`, `data.subtitle`, `data.ai_summary`, `data.comments`, `data.related`, and `data.warnings`
+- `video` comments include `data.comments[].reply_count`; nested replies are under `data.comments[].replies`
+- when `bili video --comments --all-replies` is used, `data.comments[].replies` is replaced with the fetched full reply list and may include `reply_fetched` / `reply_count_actual` metadata
 - write commands return normalized action payloads with `data.success` and `data.action`
 
 ## Error Codes

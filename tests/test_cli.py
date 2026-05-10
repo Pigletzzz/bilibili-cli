@@ -234,6 +234,59 @@ def test_video_structured_output_includes_requested_extras(runner, mock_video_in
         assert data["related"][0]["bvid"] == "BV1rel"
 
 
+def test_video_comments_all_replies_passes_options_and_outputs_nested_replies(runner, mock_video_info):
+    comments = [
+        {
+            "rpid": 1,
+            "member": {"mid": 2, "uname": "TestUser"},
+            "content": {"message": "Nice!"},
+            "like": 3,
+            "rcount": 2,
+            "replies": [
+                {
+                    "rpid": 11,
+                    "member": {"mid": 3, "uname": "ReplyUser"},
+                    "content": {"message": "Agree"},
+                    "like": 4,
+                }
+            ],
+            "reply_count_actual": 1,
+            "reply_fetched": True,
+        }
+    ]
+    with patch("bili_cli.commands.common.get_credential", return_value=None), \
+         patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
+         patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info), \
+         patch("bili_cli.client.get_video_comments", new_callable=AsyncMock, return_value={"replies": comments}) as mock_comments:
+        result = runner.invoke(
+            cli,
+            [
+                "video",
+                "BV1test123",
+                "--comments",
+                "--all-replies",
+                "--reply-page-size",
+                "10",
+                "--max-reply-pages",
+                "2",
+                "--json",
+            ],
+        )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)["data"]
+    assert data["comments"][0]["replies"][0]["author"]["name"] == "ReplyUser"
+    assert data["comments"][0]["reply_count_actual"] == 1
+    assert data["comments"][0]["reply_fetched"] is True
+    mock_comments.assert_awaited_once_with(
+        "BV1test123",
+        credential=None,
+        include_all_replies=True,
+        reply_page_size=10,
+        max_reply_pages=2,
+    )
+
+
 def test_video_subtitle_error_is_nonfatal(runner, mock_video_info):
     with patch("bili_cli.commands.common.get_credential", return_value=None), \
          patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \

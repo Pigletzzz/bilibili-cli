@@ -20,6 +20,9 @@ from . import common
     help="字幕格式：timeline 或 srt。",
 )
 @click.option("--comments", "-c", is_flag=True, help="显示评论。")
+@click.option("--all-replies", is_flag=True, help="获取每条评论的全部回复。")
+@click.option("--reply-page-size", type=click.IntRange(1, 49), default=20, show_default=True, help="楼中楼回复每页数量。")
+@click.option("--max-reply-pages", type=click.IntRange(1), default=None, help="每条评论最多抓取的回复页数。")
 @click.option("--ai", is_flag=True, help="显示 AI 总结。")
 @click.option("--related", "-r", is_flag=True, help="显示相关推荐视频。")
 @common.structured_output_options
@@ -29,6 +32,9 @@ def video(
     subtitle_timeline: bool,
     subtitle_format: str,
     comments: bool,
+    all_replies: bool,
+    reply_page_size: int,
+    max_reply_pages: int | None,
     ai: bool,
     related: bool,
     as_json: bool,
@@ -80,7 +86,13 @@ def video(
 
     if comments:
         cm_data = common.run_optional(
-            client.get_video_comments(bvid, credential=cred),
+            client.get_video_comments(
+                bvid,
+                credential=cred,
+                include_all_replies=all_replies,
+                reply_page_size=reply_page_size,
+                max_reply_pages=max_reply_pages,
+            ),
             "获取评论失败",
         )
         if cm_data is not None:
@@ -167,6 +179,22 @@ def video(
                 uname = member.get("uname", "")
                 common.console.print(f"  [cyan]{uname}[/cyan]  [dim](👍 {likes})[/dim]")
                 common.console.print(f"  {content[:120]}")
+                replies = c.get("replies") or []
+                if all_replies and replies:
+                    for reply in replies[:20]:
+                        if not isinstance(reply, dict):
+                            continue
+                        reply_member = reply.get("member", {}) if isinstance(reply.get("member"), dict) else {}
+                        reply_content = reply.get("content", {}) if isinstance(reply.get("content"), dict) else {}
+                        common.console.print(
+                            f"    [cyan]↳ {reply_member.get('uname', '匿名')}[/cyan] "
+                            f"[dim](👍 {reply.get('like', 0)})[/dim] "
+                            f"{reply_content.get('message', '')[:120]}"
+                        )
+                    if len(replies) > 20:
+                        common.console.print("    [dim]… Rich 输出仅展示前 20 条回复，完整回复请使用 --json/--yaml[/dim]")
+                elif replies:
+                    common.console.print(f"    [dim]↳ {len(replies)} 条预览回复；使用 --all-replies 获取全部回复[/dim]")
                 common.console.print()
 
     if related:
