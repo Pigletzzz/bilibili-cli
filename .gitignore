@@ -27,3 +27,7 @@ Thumbs.db
 .env.local
 
 # uv
+.uv-cache/
+
+# Downloaded media
+downloads/

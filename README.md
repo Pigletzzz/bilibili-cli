@@ -102,6 +102,9 @@ bili video BV1ABcsztEcY --related       # Related videos
 bili video BV1ABcsztEcY --yaml          # Agent-friendly YAML
 bili video BV1ABcsztEcY --json          # Normalized JSON envelope
 bili video BV1ABcsztEcY --subtitle-timeline --comments --json  # Extras in one payload
+bili download BV1ABcsztEcY              # Download best available video-only stream
+bili download BV1ABcsztEcY -q 1080p     # Cap video quality
+bili download BV1ABcsztEcY --codec hev  # Choose codec (default: avc)
 
 # Users
 bili user 946974                        # UP profile

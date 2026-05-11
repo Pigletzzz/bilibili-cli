@@ -112,9 +112,10 @@ def user_videos(uid_or_name: str, count: int, as_json: bool, as_yaml: bool):
     output_format = common.resolve_output_format(as_json=as_json, as_yaml=as_yaml)
 
     uid = _resolve_uid(uid_or_name)
+    cred = common.get_credential(mode="optional")
 
     videos = common.run_or_exit(
-        client.get_user_videos(uid, count=count, credential=None),
+        client.get_user_videos(uid, count=count, credential=cred),
         "获取视频列表失败",
     )
 
