@@ -509,13 +509,16 @@ def test_user_by_uid(runner, mock_user_info, mock_relation_info):
 
 
 def test_user_videos_json(runner):
+    mock_cred = object()
     videos = [{"bvid": "BV1new", "title": "New Video", "play": 123, "length": "01:23"}]
-    with patch("bili_cli.commands.common.get_credential", return_value=None), \
-         patch("bili_cli.client.get_user_videos", new_callable=AsyncMock, return_value=videos):
+    with patch("bili_cli.commands.common.get_credential", return_value=mock_cred) as mock_get_cred, \
+         patch("bili_cli.client.get_user_videos", new_callable=AsyncMock, return_value=videos) as mock_get_videos:
         result = runner.invoke(cli, ["user-videos", "946974", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)["data"]
         assert data[0]["bvid"] == "BV1new"
+        mock_get_cred.assert_called_once_with(mode="optional")
+        mock_get_videos.assert_awaited_once_with(946974, count=10, credential=mock_cred)
 
 
 def test_user_videos_invalid_max(runner):

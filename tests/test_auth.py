@@ -171,11 +171,12 @@ def test_get_credential_optional_uses_saved_without_validation():
         mock_extract.assert_not_called()
 
 
-def test_get_credential_write_rejects_missing_bili_jct():
+def test_get_credential_write_rejects_missing_bili_jct(tmp_path):
     saved = Credential(sessdata="saved", bili_jct="")
     with patch("bili_cli.auth._load_saved_credential", return_value=saved), \
          patch("bili_cli.auth._extract_browser_credential", return_value=None), \
-         patch("bili_cli.auth._validate_credential", return_value=False):
+         patch("bili_cli.auth._validate_credential", return_value=False), \
+         patch("bili_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json"):
         cred = get_credential(mode="write")
         assert cred is None
 

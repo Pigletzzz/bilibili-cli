@@ -136,6 +136,15 @@ bili audio BV1ABcsztEcY --no-split      # Full m4a file, no splitting
 bili audio BV1ABcsztEcY -o ~/data/      # Custom output directory
 ```
 
+### Video Download
+
+```bash
+bili download BV1ABcsztEcY              # Download video-only stream
+bili download BV1ABcsztEcY -q 1080p     # Cap video quality
+bili download BV1ABcsztEcY --codec hev  # Choose codec (default: avc)
+bili download BV1ABcsztEcY -o ~/videos  # Custom output directory
+```
+
 ### Interactions (require login)
 
 ```bash

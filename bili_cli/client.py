@@ -11,6 +11,7 @@ import copy
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -772,6 +773,93 @@ _DOWNLOAD_HEADERS = {
 }
 
 
+@dataclass(frozen=True)
+class VideoStreamInfo:
+    """Selected video-only stream metadata."""
+
+    url: str
+    quality: str
+    codec: str
+    extension: str = "mp4"
+
+
+_VIDEO_QUALITY_NAMES = {
+    "_360P": "360p",
+    "_480P": "480p",
+    "_720P": "720p",
+    "_1080P": "1080p",
+    "_1080P_PLUS": "1080p-plus",
+    "_1080P_60": "1080p60",
+    "_4K": "4k",
+    "_8K": "8k",
+    "HDR": "hdr",
+    "DOLBY": "dolby",
+    "AI_REPAIR": "ai-repair",
+}
+
+
+async def get_video_stream(
+    bvid: str,
+    credential: Credential | None = None,
+    max_quality: str = "best",
+    codec: str = "avc",
+) -> VideoStreamInfo:
+    """Get the best video-only stream URL for a video."""
+    from bilibili_api.video import VideoCodecs, VideoDownloadURLDataDetecter, VideoQuality
+
+    quality_map = {
+        "best": VideoQuality._8K,
+        "360p": VideoQuality._360P,
+        "480p": VideoQuality._480P,
+        "720p": VideoQuality._720P,
+        "1080p": VideoQuality._1080P,
+        "1080p-plus": VideoQuality._1080P_PLUS,
+        "1080p60": VideoQuality._1080P_60,
+        "4k": VideoQuality._4K,
+        "8k": VideoQuality._8K,
+    }
+    codec_map = {
+        "avc": [VideoCodecs.AVC],
+        "hev": [VideoCodecs.HEV],
+        "av1": [VideoCodecs.AV1],
+        "auto": [VideoCodecs.AVC, VideoCodecs.HEV, VideoCodecs.AV1],
+    }
+
+    try:
+        video_max_quality = quality_map[max_quality]
+    except KeyError as e:
+        raise BiliError(f"Unsupported video quality: {max_quality}") from e
+    try:
+        codecs = codec_map[codec]
+    except KeyError as e:
+        raise BiliError(f"Unsupported video codec: {codec}") from e
+
+    v = video.Video(bvid=bvid, credential=credential)
+    download_data = await _call_api("获取下载地址", v.get_download_url(page_index=0))
+    detector = VideoDownloadURLDataDetecter(download_data)
+    streams = detector.detect_best_streams(
+        video_max_quality=video_max_quality,
+        video_min_quality=VideoQuality._360P,
+        codecs=codecs,
+        no_dolby_video=True,
+        no_dolby_audio=True,
+        no_hdr=True,
+        no_hires=True,
+    )
+
+    if detector.check_flv_mp4_stream():
+        if streams and streams[0] and hasattr(streams[0], "url"):
+            extension = "flv" if streams[0].__class__.__name__.lower().startswith("flv") else "mp4"
+            return VideoStreamInfo(url=streams[0].url, quality="source", codec="source", extension=extension)
+    elif streams and streams[0] is not None and hasattr(streams[0], "url"):
+        stream = streams[0]
+        quality = _VIDEO_QUALITY_NAMES.get(getattr(stream.video_quality, "name", ""), str(stream.video_quality.value))
+        selected_codec = getattr(stream.video_codecs, "value", "unknown")
+        return VideoStreamInfo(url=stream.url, quality=quality, codec=selected_codec, extension="mp4")
+
+    raise BiliError("无法获取视频流（可能需要登录、大会员或更换清晰度/编码）")
+
+
 async def get_audio_url(bvid: str, credential: Credential | None = None) -> str:
     """Get the best audio stream URL for a video (DASH preferred)."""
     from bilibili_api.video import AudioQuality, VideoDownloadURLDataDetecter
@@ -800,15 +888,15 @@ async def get_audio_url(bvid: str, credential: Credential | None = None) -> str:
     raise BiliError("无法获取音频流（可能是会员专属视频）")
 
 
-async def download_audio(audio_url: str, output_path: str) -> int:
-    """Download audio stream to a file. Returns bytes written."""
+async def download_stream(stream_url: str, output_path: str, label: str = "stream") -> int:
+    """Download a media stream to a file. Returns bytes written."""
     timeout = aiohttp.ClientTimeout(total=300)
     max_retries = 3
 
     for attempt in range(max_retries):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(audio_url, headers=_DOWNLOAD_HEADERS) as resp:
+                async with session.get(stream_url, headers=_DOWNLOAD_HEADERS) as resp:
                     if resp.status == 200:
                         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
                         total_bytes = 0
@@ -823,15 +911,25 @@ async def download_audio(audio_url: str, output_path: str) -> int:
                         logger.warning("Download HTTP %d, retrying...", resp.status)
                         await asyncio.sleep(2)
                     else:
-                        raise NetworkError(f"音频下载失败: HTTP {resp.status}")
+                        raise NetworkError(f"{label} download failed: HTTP {resp.status}")
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             if attempt < max_retries - 1:
                 logger.warning("Download error: %s, retrying...", e)
                 await asyncio.sleep(2)
             else:
-                raise NetworkError(f"音频下载失败: {e}") from e
+                raise NetworkError(f"{label} download failed: {e}") from e
 
-    raise NetworkError("音频下载失败: 重试次数用尽")
+    raise NetworkError(f"{label} download failed: retries exhausted")
+
+
+async def download_audio(audio_url: str, output_path: str) -> int:
+    """Download audio stream to a file. Returns bytes written."""
+    return await download_stream(audio_url, output_path, label="audio")
+
+
+async def download_video(video_url: str, output_path: str) -> int:
+    """Download video-only stream to a file. Returns bytes written."""
+    return await download_stream(video_url, output_path, label="video")
 
 
 def split_audio(input_path: str, output_dir: str, segment_seconds: int = 25) -> list[str]:
