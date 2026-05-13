@@ -280,6 +280,36 @@ async def test_get_all_comments_retries_rate_limit_with_backoff():
     assert mock_direct.await_count == 2
     mock_sleep.assert_awaited_once_with(10)
 
+
+@pytest.mark.asyncio
+async def test_get_all_comments_does_not_repeat_page_delay_after_rate_limit():
+    pages = [
+        {"replies": [{"rpid": 1}, {"rpid": 2}], "page": {"count": 3}},
+        client.RateLimitError("slow down"),
+        {"replies": [{"rpid": 3}], "page": {"count": 3}},
+    ]
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=pages), \
+         patch("bili_cli.client.random.uniform", return_value=1.0), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments("BV1test123", page_size=2, request_delay=1.5)
+
+    assert [item["rpid"] for item in result["replies"]] == [1, 2, 3]
+    assert [call.args[0] for call in mock_sleep.await_args_list] == [1.5, 10]
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_raises_after_rate_limit_retry_budget():
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=client.RateLimitError("slow down")), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        with pytest.raises(client.RateLimitError):
+            await client.get_all_comments("BV1test123", max_rate_limit_retries=1)
+
+    mock_sleep.assert_awaited_once_with(10)
+
 @pytest.mark.asyncio
 async def test_search_user():
     mock_data = {"result": [{"mid": 123, "uname": "TestUser", "fans": 100}]}

@@ -366,6 +366,19 @@ def _comment_api_headers(bvid: str, credential: Credential | None = None) -> dic
     return headers
 
 
+def _raise_comment_api_error(action: str, code: int | None, message: str) -> None:
+    """Raise a normalized error for comment API failures."""
+    if code in {-412, 412, 429}:
+        raise RateLimitError(f"{action}: [{code}] {message}")
+    raise BiliError(f"{action}: [{code}] {message}")
+
+
+def _raise_comment_http_error(action: str, status: int) -> None:
+    """Raise a normalized error for comment API HTTP failures."""
+    if status in {412, 429}:
+        raise RateLimitError(f"{action}: HTTP {status}")
+
+
 async def _get_video_comments_direct(
     aid: int,
     bvid: str,
@@ -388,17 +401,11 @@ async def _get_video_comments_direct(
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(api_url, params=params, headers=_comment_api_headers(bvid, credential)) as resp:
-            if resp.status in {412, 429}:
-                raise RateLimitError(f"获取视频评论: HTTP {resp.status}")
+            _raise_comment_http_error("获取视频评论", resp.status)
             resp.raise_for_status()
             payload = await resp.json()
     if payload.get("code") != 0:
-        code = payload.get("code")
-        if code in {-412, 412, 429}:
-            raise RateLimitError(f"获取视频评论: [{code}] {payload.get('message', 'Unknown error')}")
-        raise BiliError(
-            f"获取视频评论: [{code}] {payload.get('message', 'Unknown error')}"
-        )
+        _raise_comment_api_error("获取视频评论", payload.get("code"), payload.get("message", "Unknown error"))
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
 
@@ -423,15 +430,11 @@ async def _fetch_comment_replies_page(
         "ps": page_size,
     }
     async with session.get(api_url, params=params, headers=_comment_api_headers(bvid, credential)) as resp:
-        if resp.status in {412, 429}:
-            raise RateLimitError(f"获取评论回复: HTTP {resp.status}")
+        _raise_comment_http_error("获取评论回复", resp.status)
         resp.raise_for_status()
         payload = await resp.json()
     if payload.get("code") != 0:
-        code = payload.get("code")
-        if code in {-412, 412, 429}:
-            raise RateLimitError(f"获取评论回复: [{code}] {payload.get('message', 'Unknown error')}")
-        raise BiliError(f"获取评论回复: [{code}] {payload.get('message', 'Unknown error')}")
+        _raise_comment_api_error("获取评论回复", payload.get("code"), payload.get("message", "Unknown error"))
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
 
@@ -540,6 +543,7 @@ async def get_all_comments(
     """Fetch all top-level video comments by paginating the direct reply API."""
     page_size = max(1, min(page_size, 50))
     request_delay = max(0.0, request_delay)
+    max_rate_limit_retries = max(0, max_rate_limit_retries)
 
     v = video.Video(bvid=bvid, credential=credential)
     info = await _call_api("获取视频信息", v.get_info())
@@ -548,7 +552,7 @@ async def get_all_comments(
         raise BiliError("获取视频评论: 视频信息缺少 aid")
 
     result: dict[str, Any] = {"replies": []}
-    all_replies: list[dict[str, Any]] = []
+    all_comments: list[dict[str, Any]] = []
     page = 1
     consecutive_rate_limits = 0
 
@@ -556,7 +560,7 @@ async def get_all_comments(
         if max_pages is not None and page > max_pages:
             break
 
-        if page > 1 and request_delay > 0:
+        if page > 1 and consecutive_rate_limits == 0 and request_delay > 0:
             await asyncio.sleep(request_delay * random.uniform(0.7, 1.3))
 
         try:
@@ -587,20 +591,20 @@ async def get_all_comments(
         if not isinstance(page_replies, list) or not page_replies:
             break
 
-        all_replies.extend(item for item in page_replies if isinstance(item, dict))
-        result["replies"] = all_replies
+        all_comments.extend(item for item in page_replies if isinstance(item, dict))
+        result["replies"] = all_comments
         if progress_callback is not None:
-            progress_callback(page, len(all_replies))
+            progress_callback(page, len(all_comments))
 
         page_info = page_result.get("page", {}) if isinstance(page_result.get("page"), dict) else {}
         total = page_info.get("count")
-        if isinstance(total, int) and len(all_replies) >= total:
+        if isinstance(total, int) and len(all_comments) >= total:
             break
         if len(page_replies) < page_size:
             break
         page += 1
 
-    result["replies"] = all_replies
+    result["replies"] = all_comments
     if include_all_replies:
         return await _call_api(
             "获取评论回复",
