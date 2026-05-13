@@ -303,7 +303,7 @@ def test_video_all_comments_json_passes_pagination_options(runner, mock_video_in
                 "BV1test123",
                 "--all-comments",
                 "--comment-page-size",
-                "50",
+                "20",
                 "--max-comment-pages",
                 "5",
                 "--all-replies",
@@ -323,7 +323,7 @@ def test_video_all_comments_json_passes_pagination_options(runner, mock_video_in
     mock_all_comments.assert_awaited_once_with(
         "BV1test123",
         credential=None,
-        page_size=50,
+        page_size=20,
         max_pages=5,
         include_all_replies=True,
         reply_page_size=10,

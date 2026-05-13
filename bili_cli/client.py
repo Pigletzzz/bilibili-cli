@@ -37,6 +37,7 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/133.0.0.0 Safari/537.36"
 )
+_COMMENT_PAGE_SIZE_MAX = 20
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +389,7 @@ async def _get_video_comments_direct(
     page_size: int = 20,
 ) -> dict[str, Any]:
     """Fallback direct API call for video comments when SDK returns empty."""
-    page_size = max(1, min(page_size, 50))
+    page_size = max(1, min(page_size, _COMMENT_PAGE_SIZE_MAX))
     api_url = "https://api.bilibili.com/x/v2/reply"
     params = {
         "oid": aid,
@@ -541,7 +542,7 @@ async def get_all_comments(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Fetch all top-level video comments by paginating the direct reply API."""
-    page_size = max(1, min(page_size, 50))
+    page_size = max(1, min(page_size, _COMMENT_PAGE_SIZE_MAX))
     request_delay = max(0.0, request_delay)
     max_rate_limit_retries = max(0, max_rate_limit_retries)
 
@@ -596,12 +597,6 @@ async def get_all_comments(
         if progress_callback is not None:
             progress_callback(page, len(all_comments))
 
-        page_info = page_result.get("page", {}) if isinstance(page_result.get("page"), dict) else {}
-        total = page_info.get("count")
-        if isinstance(total, int) and len(all_comments) >= total:
-            break
-        if len(page_replies) < page_size:
-            break
         page += 1
 
     result["replies"] = all_comments

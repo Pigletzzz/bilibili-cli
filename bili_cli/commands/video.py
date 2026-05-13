@@ -25,7 +25,7 @@ from . import common
 @click.option("--all-comments", is_flag=True, help="递归翻页获取全部顶层评论。")
 @click.option(
     "--comment-page-size",
-    type=click.IntRange(1, 50),
+    type=click.IntRange(1, 20),
     default=20,
     show_default=True,
     help="顶层评论每页数量。",
