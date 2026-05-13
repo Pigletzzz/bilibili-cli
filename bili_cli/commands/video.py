@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import click
 from rich.table import Table
 
@@ -20,6 +22,22 @@ from . import common
     help="字幕格式：timeline 或 srt。",
 )
 @click.option("--comments", "-c", is_flag=True, help="显示评论。")
+@click.option("--all-comments", is_flag=True, help="递归翻页获取全部顶层评论。")
+@click.option(
+    "--comment-page-size",
+    type=click.IntRange(1, 50),
+    default=20,
+    show_default=True,
+    help="顶层评论每页数量。",
+)
+@click.option("--max-comment-pages", type=click.IntRange(1), default=None, help="顶层评论最多抓取页数。")
+@click.option(
+    "--request-delay",
+    type=click.FloatRange(0.5, 30.0),
+    default=1.5,
+    show_default=True,
+    help="翻页请求间隔秒数。",
+)
 @click.option("--all-replies", is_flag=True, help="获取每条评论的全部回复。")
 @click.option("--reply-page-size", type=click.IntRange(1, 49), default=20, show_default=True, help="楼中楼回复每页数量。")
 @click.option("--max-reply-pages", type=click.IntRange(1), default=None, help="每条评论最多抓取的回复页数。")
@@ -32,6 +50,10 @@ def video(
     subtitle_timeline: bool,
     subtitle_format: str,
     comments: bool,
+    all_comments: bool,
+    comment_page_size: int,
+    max_comment_pages: int | None,
+    request_delay: float,
     all_replies: bool,
     reply_page_size: int,
     max_reply_pages: int | None,
@@ -49,7 +71,7 @@ def video(
     output_format = common.resolve_output_format(as_json=as_json, as_yaml=as_yaml)
 
     bvid = common.extract_bvid_or_exit(bv_or_url)
-    needs_optional_cred = subtitle or subtitle_timeline or comments or ai or related
+    needs_optional_cred = subtitle or subtitle_timeline or comments or all_comments or ai or related
     cred = common.get_credential(mode="optional") if needs_optional_cred else None
 
     info = common.run_or_exit(
@@ -84,17 +106,41 @@ def video(
         else:
             warnings.append({"code": "ai_summary_unavailable", "message": "获取 AI 总结失败"})
 
-    if comments:
-        cm_data = common.run_optional(
-            client.get_video_comments(
+    if all_comments and output_format is None and (max_comment_pages is None or max_comment_pages > 10):
+        common.console.print(
+            "[yellow]⚠️  全量评论会连续翻页，可能触发风控；建议用 --max-comment-pages 限制页数，"
+            "大输出可配合 --json/--yaml 重定向到文件。[/yellow]"
+        )
+
+    if comments or all_comments:
+        if all_comments:
+            progress_callback: Callable[[int, int], None] | None = None
+            if output_format is None:
+
+                def progress_callback(page: int, total: int) -> None:
+                    common.console.print(f"第 {page} 页...（已获取 {total} 条）")
+
+            comments_coro = client.get_all_comments(
+                bvid,
+                credential=cred,
+                page_size=comment_page_size,
+                max_pages=max_comment_pages,
+                include_all_replies=all_replies,
+                reply_page_size=reply_page_size,
+                max_reply_pages=max_reply_pages,
+                request_delay=request_delay,
+                progress_callback=progress_callback,
+            )
+        else:
+            comments_coro = client.get_video_comments(
                 bvid,
                 credential=cred,
                 include_all_replies=all_replies,
                 reply_page_size=reply_page_size,
                 max_reply_pages=max_reply_pages,
-            ),
-            "获取评论失败",
-        )
+            )
+
+        cm_data = common.run_optional(comments_coro, "获取评论失败")
         if cm_data is not None:
             comments_items = cm_data.get("replies") or []
         else:
@@ -167,8 +213,9 @@ def video(
         else:
             common.console.print("[yellow]⚠️  该视频暂无 AI 总结[/yellow]")
 
-    if comments:
-        common.console.print("\n[bold]💬 热门评论:[/bold]\n")
+    if comments or all_comments:
+        comments_title = "💬 全部评论" if all_comments else "💬 热门评论"
+        common.console.print(f"\n[bold]{comments_title}:[/bold]\n")
         if not comments_items:
             common.console.print("[yellow]暂无评论[/yellow]")
         else:

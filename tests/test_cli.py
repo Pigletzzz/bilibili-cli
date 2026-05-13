@@ -287,6 +287,75 @@ def test_video_comments_all_replies_passes_options_and_outputs_nested_replies(ru
     )
 
 
+
+def test_video_all_comments_json_passes_pagination_options(runner, mock_video_info):
+    comments = [
+        {"rpid": 1, "member": {"mid": 2, "uname": "TestUser"}, "content": {"message": "Nice!"}, "like": 3}
+    ]
+    with patch("bili_cli.commands.common.get_credential", return_value=None), \
+         patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
+         patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info), \
+         patch("bili_cli.client.get_all_comments", new_callable=AsyncMock, return_value={"replies": comments}) as mock_all_comments:
+        result = runner.invoke(
+            cli,
+            [
+                "video",
+                "BV1test123",
+                "--all-comments",
+                "--comment-page-size",
+                "50",
+                "--max-comment-pages",
+                "5",
+                "--all-replies",
+                "--reply-page-size",
+                "10",
+                "--max-reply-pages",
+                "2",
+                "--request-delay",
+                "2.0",
+                "--json",
+            ],
+        )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)["data"]
+    assert data["comments"][0]["author"]["name"] == "TestUser"
+    mock_all_comments.assert_awaited_once_with(
+        "BV1test123",
+        credential=None,
+        page_size=50,
+        max_pages=5,
+        include_all_replies=True,
+        reply_page_size=10,
+        max_reply_pages=2,
+        request_delay=2.0,
+        progress_callback=None,
+    )
+
+
+def test_video_all_comments_rich_outputs_risk_warning_and_progress(runner, mock_video_info):
+    async def fake_get_all_comments(*args, **kwargs):
+        progress_callback = kwargs["progress_callback"]
+        progress_callback(1, 2)
+        return {
+            "replies": [
+                {"rpid": 1, "member": {"mid": 2, "uname": "TestUser"}, "content": {"message": "Nice!"}, "like": 3},
+                {"rpid": 2, "member": {"mid": 3, "uname": "OtherUser"}, "content": {"message": "Great!"}, "like": 4},
+            ]
+        }
+
+    with patch("bili_cli.commands.common.get_credential", return_value=None), \
+         patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
+         patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info), \
+         patch("bili_cli.client.get_all_comments", new_callable=AsyncMock, side_effect=fake_get_all_comments):
+        result = runner.invoke(cli, ["video", "BV1test123", "--all-comments"])
+
+    assert result.exit_code == 0
+    assert "全量评论会连续翻页" in result.output
+    assert "第 1 页...（已获取 2 条）" in result.output
+    assert "全部评论" in result.output
+    assert "TestUser" in result.output
+
 def test_video_subtitle_error_is_nonfatal(runner, mock_video_info):
     with patch("bili_cli.commands.common.get_credential", return_value=None), \
          patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
