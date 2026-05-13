@@ -185,6 +185,164 @@ async def test_get_rank_videos():
         assert result["list"][0]["score"] == 1000
 
 
+
+@pytest.mark.asyncio
+async def test_get_all_comments_paginates_direct_api_and_reports_progress():
+    pages = [
+        {"replies": [{"rpid": 1}, {"rpid": 2}], "page": {"count": 5}, "upper": {"mid": 99}},
+        {"replies": [{"rpid": 3}, {"rpid": 4}], "page": {"count": 5}},
+        {"replies": [{"rpid": 5}], "page": {"count": 5}},
+        {"replies": [], "page": {"count": 5}},
+    ]
+    progress: list[tuple[int, int]] = []
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=pages) as mock_direct, \
+         patch("bili_cli.client.random.uniform", return_value=1.0), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments(
+            "BV1test123",
+            page_size=2,
+            request_delay=1.5,
+            progress_callback=lambda page, total: progress.append((page, total)),
+        )
+
+    assert [item["rpid"] for item in result["replies"]] == [1, 2, 3, 4, 5]
+    assert result["upper"] == {"mid": 99}
+    assert progress == [(1, 2), (2, 4), (3, 5)]
+    assert mock_direct.await_args_list[0].kwargs == {
+        "aid": 123,
+        "bvid": "BV1test123",
+        "page": 1,
+        "credential": None,
+        "page_size": 2,
+    }
+    assert mock_direct.await_args_list[2].kwargs["page"] == 3
+    assert mock_direct.await_args_list[3].kwargs["page"] == 4
+    assert mock_sleep.await_count == 3
+    mock_sleep.assert_any_await(1.5)
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_honors_max_pages():
+    pages = [
+        {"replies": [{"rpid": 1}, {"rpid": 2}], "page": {"count": 10}},
+        {"replies": [{"rpid": 3}, {"rpid": 4}], "page": {"count": 10}},
+    ]
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=pages) as mock_direct, \
+         patch("bili_cli.client.random.uniform", return_value=1.0), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock):
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments("BV1test123", page_size=2, max_pages=2, request_delay=0.5)
+
+    assert [item["rpid"] for item in result["replies"]] == [1, 2, 3, 4]
+    assert mock_direct.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_continues_after_short_non_empty_page():
+    pages = [
+        {"replies": [{"rpid": i} for i in range(1, 21)], "page": {"count": 466}},
+        {"replies": [{"rpid": i} for i in range(21, 40)], "page": {"count": 466}},
+        {"replies": [{"rpid": i} for i in range(40, 60)], "page": {"count": 466}},
+        {"replies": []},
+    ]
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=pages) as mock_direct, \
+         patch("bili_cli.client.random.uniform", return_value=1.0), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock):
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments("BV1test123", page_size=20, request_delay=0.5)
+
+    assert [item["rpid"] for item in result["replies"]] == list(range(1, 60))
+    assert mock_direct.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_clamps_top_level_page_size_to_api_limit():
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, return_value={"replies": []}) as mock_direct:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        await client.get_all_comments("BV1test123", page_size=50)
+
+    assert mock_direct.await_args.kwargs["page_size"] == 20
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_can_attach_all_replies_after_pagination():
+    page = {"replies": [{"rpid": 1}, {"rpid": 2}], "page": {"count": 2}}
+    enriched = {"replies": [{"rpid": 1, "replies": [{"rpid": 11}]}, {"rpid": 2, "replies": []}]}
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=[page, {"replies": []}]), \
+         patch("bili_cli.client._attach_all_comment_replies", new_callable=AsyncMock, return_value=enriched) as mock_attach:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments(
+            "BV1test123",
+            max_pages=1,
+            include_all_replies=True,
+            reply_page_size=10,
+            max_reply_pages=2,
+        )
+
+    assert result == enriched
+    mock_attach.assert_awaited_once_with(
+        {"replies": [{"rpid": 1}, {"rpid": 2}], "page": {"count": 2}},
+        aid=123,
+        bvid="BV1test123",
+        credential=None,
+        reply_page_size=10,
+        max_reply_pages=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_retries_rate_limit_with_backoff():
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch(
+             "bili_cli.client._get_video_comments_direct",
+             new_callable=AsyncMock,
+             side_effect=[client.RateLimitError("slow down"), {"replies": [{"rpid": 1}], "page": {"count": 1}}],
+         ) as mock_direct, \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments("BV1test123", max_pages=1)
+
+    assert result["replies"] == [{"rpid": 1}]
+    assert mock_direct.await_count == 2
+    mock_sleep.assert_awaited_once_with(10)
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_does_not_repeat_page_delay_after_rate_limit():
+    pages = [
+        {"replies": [{"rpid": 1}, {"rpid": 2}], "page": {"count": 3}},
+        client.RateLimitError("slow down"),
+        {"replies": [{"rpid": 3}], "page": {"count": 3}},
+    ]
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=pages), \
+         patch("bili_cli.client.random.uniform", return_value=1.0), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        result = await client.get_all_comments("BV1test123", page_size=2, max_pages=2, request_delay=1.5)
+
+    assert [item["rpid"] for item in result["replies"]] == [1, 2, 3]
+    assert [call.args[0] for call in mock_sleep.await_args_list] == [1.5, 10]
+
+
+@pytest.mark.asyncio
+async def test_get_all_comments_raises_after_rate_limit_retry_budget():
+    with patch("bili_cli.client.video.Video") as MockVideo, \
+         patch("bili_cli.client._get_video_comments_direct", new_callable=AsyncMock, side_effect=client.RateLimitError("slow down")), \
+         patch("bili_cli.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        MockVideo.return_value.get_info = AsyncMock(return_value={"aid": 123})
+        with pytest.raises(client.RateLimitError):
+            await client.get_all_comments("BV1test123", max_rate_limit_retries=1)
+
+    mock_sleep.assert_awaited_once_with(10)
+
+
 @pytest.mark.asyncio
 async def test_search_user():
     mock_data = {"result": [{"mid": 123, "uname": "TestUser", "fans": 100}]}

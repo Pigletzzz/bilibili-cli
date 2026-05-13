@@ -10,7 +10,9 @@ import asyncio
 import copy
 import logging
 import os
+import random
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +37,7 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/133.0.0.0 Safari/537.36"
 )
+_COMMENT_PAGE_SIZE_MAX = 20
 
 
 # ---------------------------------------------------------------------------
@@ -364,31 +367,46 @@ def _comment_api_headers(bvid: str, credential: Credential | None = None) -> dic
     return headers
 
 
+def _raise_comment_api_error(action: str, code: int | None, message: str) -> None:
+    """Raise a normalized error for comment API failures."""
+    if code in {-412, 412, 429}:
+        raise RateLimitError(f"{action}: [{code}] {message}")
+    raise BiliError(f"{action}: [{code}] {message}")
+
+
+def _raise_comment_http_error(action: str, status: int) -> None:
+    """Raise a normalized error for comment API HTTP failures."""
+    if status in {412, 429}:
+        raise RateLimitError(f"{action}: HTTP {status}")
+
+
 async def _get_video_comments_direct(
     aid: int,
     bvid: str,
     page: int,
     credential: Credential | None = None,
+    *,
+    page_size: int = 20,
 ) -> dict[str, Any]:
     """Fallback direct API call for video comments when SDK returns empty."""
+    page_size = max(1, min(page_size, _COMMENT_PAGE_SIZE_MAX))
     api_url = "https://api.bilibili.com/x/v2/reply"
     params = {
         "oid": aid,
         "type": 1,
         "pn": page,
-        "ps": 20,
+        "ps": page_size,
         "sort": 2,  # hot/popular
     }
 
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(api_url, params=params, headers=_comment_api_headers(bvid, credential)) as resp:
+            _raise_comment_http_error("获取视频评论", resp.status)
             resp.raise_for_status()
             payload = await resp.json()
     if payload.get("code") != 0:
-        raise BiliError(
-            f"获取视频评论: [{payload.get('code')}] {payload.get('message', 'Unknown error')}"
-        )
+        _raise_comment_api_error("获取视频评论", payload.get("code"), payload.get("message", "Unknown error"))
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
 
@@ -413,10 +431,11 @@ async def _fetch_comment_replies_page(
         "ps": page_size,
     }
     async with session.get(api_url, params=params, headers=_comment_api_headers(bvid, credential)) as resp:
+        _raise_comment_http_error("获取评论回复", resp.status)
         resp.raise_for_status()
         payload = await resp.json()
     if payload.get("code") != 0:
-        raise BiliError(f"获取评论回复: [{payload.get('code')}] {payload.get('message', 'Unknown error')}")
+        _raise_comment_api_error("获取评论回复", payload.get("code"), payload.get("message", "Unknown error"))
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
 
@@ -507,6 +526,93 @@ async def _attach_all_comment_replies(
 
     await asyncio.gather(*(enrich(item) for item in enriched_comments if isinstance(item, dict)))
     return enriched
+
+
+async def get_all_comments(
+    bvid: str,
+    credential: Credential | None = None,
+    *,
+    page_size: int = 20,
+    max_pages: int | None = None,
+    include_all_replies: bool = False,
+    reply_page_size: int = 20,
+    max_reply_pages: int | None = None,
+    request_delay: float = 1.5,
+    max_rate_limit_retries: int = 3,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """Fetch all top-level video comments by paginating the direct reply API."""
+    page_size = max(1, min(page_size, _COMMENT_PAGE_SIZE_MAX))
+    request_delay = max(0.0, request_delay)
+    max_rate_limit_retries = max(0, max_rate_limit_retries)
+
+    v = video.Video(bvid=bvid, credential=credential)
+    info = await _call_api("获取视频信息", v.get_info())
+    aid = info.get("aid")
+    if aid is None:
+        raise BiliError("获取视频评论: 视频信息缺少 aid")
+
+    result: dict[str, Any] = {"replies": []}
+    all_comments: list[dict[str, Any]] = []
+    page = 1
+    consecutive_rate_limits = 0
+
+    while True:
+        if max_pages is not None and page > max_pages:
+            break
+
+        if page > 1 and consecutive_rate_limits == 0 and request_delay > 0:
+            await asyncio.sleep(request_delay * random.uniform(0.7, 1.3))
+
+        try:
+            page_result = await _call_api(
+                "获取视频评论",
+                _get_video_comments_direct(
+                    aid=aid,
+                    bvid=bvid,
+                    page=page,
+                    credential=credential,
+                    page_size=page_size,
+                ),
+            )
+            consecutive_rate_limits = 0
+        except RateLimitError:
+            consecutive_rate_limits += 1
+            if consecutive_rate_limits > max_rate_limit_retries:
+                raise
+            await asyncio.sleep(min((2 ** consecutive_rate_limits) * 5, 60))
+            continue
+
+        if not isinstance(page_result, dict):
+            break
+        if page == 1:
+            result = copy.deepcopy(page_result)
+
+        page_replies = page_result.get("replies")
+        if not isinstance(page_replies, list) or not page_replies:
+            break
+
+        all_comments.extend(item for item in page_replies if isinstance(item, dict))
+        result["replies"] = all_comments
+        if progress_callback is not None:
+            progress_callback(page, len(all_comments))
+
+        page += 1
+
+    result["replies"] = all_comments
+    if include_all_replies:
+        return await _call_api(
+            "获取评论回复",
+            _attach_all_comment_replies(
+                result,
+                aid=aid,
+                bvid=bvid,
+                credential=credential,
+                reply_page_size=reply_page_size,
+                max_reply_pages=max_reply_pages,
+            ),
+        )
+    return result
 
 
 async def get_video_comments(
